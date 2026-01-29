@@ -175,7 +175,7 @@ def main(argv=None) -> int:
     p.add_argument(
         "--per-scan-timebox",
         type=float,
-        default=120.0,
+        default=300.0,
         help="Timebox (secondes) par sous-scan. Si dépassé, statut PARTIAL et le run continue.",
     )
     p.add_argument(

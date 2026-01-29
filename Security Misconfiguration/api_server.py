@@ -85,7 +85,7 @@ def create_app() -> Flask:
         read_timeout = _safe_float(payload.get("readTimeout"), 6.0)
         retries = _safe_int(payload.get("retries"), 1)
         workers = _safe_int(payload.get("workers"), 0)
-        per_scan_timebox = _safe_float(payload.get("perScanTimebox"), 120.0)
+        per_scan_timebox = _safe_float(payload.get("perScanTimebox"), 300.0)
         turbo = bool(payload.get("turbo", False))
         generate_pdf = bool(payload.get("generatePdf", False))
 
