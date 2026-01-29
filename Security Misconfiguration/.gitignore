@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Résultats de scan (ne pas versionner)
+results*.json
+report*.pdf
+EXPLOITATION_GUIDE.md
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Artifacts
+artifacts/*.pdf
+artifacts/*.json
+
+# Frontend (Automatedsecurityaudittool)
+node_modules/
+.vite/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Lockfiles (optionnel: garde celui utilisé par le projet)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
