@@ -15,44 +15,25 @@ export type A02ScanRequest = {
 
 // Le backend Python tourne en local. En dev Vite on passe par un proxy (/api).
 const API_BASE = '/api';
-const TOKEN_STORAGE_KEY = 'a02_jwt_token';
+const TOKEN_STORAGE_KEY = 'token'; // ⚠️ Utiliser 'token' (localStorage key du App.tsx)
+
+export class AuthRequiredError extends Error {
+  code = 'AUTH_REQUIRED' as const;
+  constructor(message = 'Authentification requise. Veuillez vous reconnecter.') {
+    super(message);
+    this.name = 'AuthRequiredError';
+  }
+}
 
 /**
- * Récupère ou génère un token JWT pour l'authentification.
- * Le token est stocké en sessionStorage et réutilisé s'il n'a pas expiré.
+ * Récupère le token JWT stocké en localStorage.
+ * IMPORTANT: on ne fait PAS de fallback automatique vers /auth/token,
+ * sinon on retombe sur l'utilisateur "system" (id=1) au restore.
  */
 export async function getOrCreateToken(): Promise<string> {
-  // Vérifier si un token existe déjà
-  const storedToken = sessionStorage.getItem(TOKEN_STORAGE_KEY);
-
-  if (storedToken) {
-    // Vérifier si le token est encore valide (format simple: pas de vrai décodage JWT côté frontend)
-    // En production, on pourrait décoder le JWT pour vérifier exp
-    return storedToken;
-  }
-
-  // Sinon, demander un nouveau token
-  try {
-    const response = await fetch(`${API_BASE}/auth/token`, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' }
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to get token (${response.status}): ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    const token = data.token;
-
-    // Sauvegarder le token
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
-
-    return token;
-  } catch (error) {
-    console.error('Error getting JWT token:', error);
-    throw new Error('Unable to authenticate with the API. Please ensure the backend is running.');
-  }
+  const storedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
+  if (storedToken) return storedToken;
+  throw new AuthRequiredError();
 }
 
 /**
@@ -70,22 +51,21 @@ export async function renewToken(currentToken: string): Promise<string> {
 
     if (!response.ok) {
       if (response.status === 401) {
-        // Token expiré, en supprimer et redemander un nouveau
-        sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-        return getOrCreateToken();
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
+        throw new AuthRequiredError();
       }
       throw new Error(`Failed to renew token (${response.status})`);
     }
 
     const data = await response.json();
     const newToken = data.token;
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, newToken);
+    localStorage.setItem(TOKEN_STORAGE_KEY, newToken);
     return newToken;
   } catch (error) {
+    if (error instanceof AuthRequiredError) throw error;
     console.error('Error renewing JWT token:', error);
-    // En cas d'erreur, forcer un nouveau token
-    sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-    return getOrCreateToken();
+    // En cas d'erreur réseau/etc, ne pas basculer vers /auth/token
+    throw new Error('Impossible de renouveler le token. Veuillez réessayer.');
   }
 }
 
@@ -103,23 +83,9 @@ export async function runA02Scan(payload: A02ScanRequest): Promise<unknown> {
 
   if (!r.ok) {
     if (r.status === 401) {
-      // Token invalide/expiré, supprimer et redemander
-      sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-      const newToken = await getOrCreateToken();
-      // Réessayer avec le nouveau token
-      const retryR = await fetch(`${API_BASE}/scan`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${newToken}`
-        },
-        body: JSON.stringify(payload)
-      });
-      if (!retryR.ok) {
-        const text = await retryR.text().catch(() => '');
-        throw new Error(`API scan error (${retryR.status}): ${text || retryR.statusText}`);
-      }
-      return retryR.json();
+      // Token invalide/expiré: forcer reconnexion (ne pas prendre token system)
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      throw new AuthRequiredError();
     }
     const text = await r.text().catch(() => '');
     throw new Error(`API scan error (${r.status}): ${text || r.statusText}`);
@@ -285,21 +251,8 @@ export async function getA02ScansList(): Promise<{ count: number; scans: string[
 
   if (!r.ok) {
     if (r.status === 401) {
-      // Token invalide/expiré, supprimer et redemander
-      sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-      const newToken = await getOrCreateToken();
-      // Réessayer avec le nouveau token
-      const retryR = await fetch(`${API_BASE}/scans`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${newToken}`
-        }
-      });
-      if (!retryR.ok) {
-        const text = await retryR.text().catch(() => '');
-        throw new Error(`API scans error (${retryR.status}): ${text || retryR.statusText}`);
-      }
-      return retryR.json();
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      throw new AuthRequiredError();
     }
     const text = await r.text().catch(() => '');
     throw new Error(`API scans error (${r.status}): ${text || r.statusText}`);
@@ -325,24 +278,16 @@ export async function fetchArtifact(artifactPath: string): Promise<Response | nu
 
     if (!r.ok) {
       if (r.status === 401) {
-        // Token expiré, redemander
-        sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-        const newToken = await getOrCreateToken();
-        const retryR = await fetch(`${API_BASE}${artifactPath}`, {
-          method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${newToken}`
-          }
-        });
-        return retryR.ok ? retryR : null;
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
+        throw new AuthRequiredError();
       }
       return null;
     }
 
     return r;
   } catch (error) {
+    if (error instanceof AuthRequiredError) throw error;
     console.error('Error fetching artifact:', error);
     return null;
   }
 }
-
