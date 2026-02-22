@@ -419,32 +419,41 @@ def main(argv=None) -> int:
         print(f"\n[*] Génération du rapport PDF...")
         try:
             from ..reporting.pdf_report import generate_pdf_report
+            import threading
+            import sys
 
-            # Utiliser un timeout pour éviter blocage
-            import signal
+            # Utiliser threading pour timeout (compatible Windows)
+            pdf_error = [None]
+            pdf_success = [False]
 
-            def timeout_handler(signum, frame):
-                raise TimeoutError("PDF generation timeout")
+            def generate_with_timeout():
+                try:
+                    generate_pdf_report(aggregated, args.pdf)
+                    pdf_success[0] = True
+                except Exception as e:
+                    pdf_error[0] = e
 
             # Timeout de 60 secondes pour le PDF
-            try:
-                if hasattr(signal, 'SIGALRM'):
-                    signal.signal(signal.SIGALRM, timeout_handler)
-                    signal.alarm(60)
+            thread = threading.Thread(target=generate_with_timeout, daemon=True)
+            thread.start()
+            thread.join(timeout=60.0)
 
-                generate_pdf_report(aggregated, args.pdf)
-
-                if hasattr(signal, 'SIGALRM'):
-                    signal.alarm(0)
-
-                aggregated.setdefault("artifacts", {})["pdf_report"] = args.pdf
-                print(f"[OK] PDF genere: {args.pdf}")
-            except TimeoutError:
+            if thread.is_alive():
                 print(f"[!] Timeout lors de la génération PDF (60s)")
                 aggregated.setdefault("artifacts", {})["pdf_report_error"] = "Timeout (60s)"
+            elif pdf_error[0]:
+                raise pdf_error[0]
+            elif pdf_success[0]:
+                aggregated.setdefault("artifacts", {})["pdf_report"] = args.pdf
+                print(f"[OK] PDF genere: {args.pdf}")
+            else:
+                print(f"[!] PDF non généré (raison inconnue)")
+                aggregated.setdefault("artifacts", {})["pdf_report_error"] = "Unknown error"
 
         except Exception as e:
             print(f"[!] Erreur génération PDF: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             aggregated.setdefault("artifacts", {})["pdf_report_error"] = f"{type(e).__name__}: {e}"
 
     print(f"\n[OK] Scan termine en {duration_s:.1f}s")

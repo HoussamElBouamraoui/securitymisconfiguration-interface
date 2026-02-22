@@ -11,6 +11,7 @@ Conçu pour un usage local (127.0.0.1) et une intégration UI.
 from __future__ import annotations
 
 import json
+import bcrypt
 import os
 import subprocess
 import tempfile
@@ -31,6 +32,11 @@ from a02_security_misconfiguration.database.models import User, ScanRun, Finding
 # Les runners sont exécutés via subprocess (ne pas importer main() ici)
 from a02_security_misconfiguration.registry import CHECKS
 
+def hash_password(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+def check_password(pw: str, pw_hash: str) -> bool:
+    return bcrypt.checkpw(pw.encode("utf-8"), pw_hash.encode("utf-8"))
 
 def _safe_float(v: Any, default: float) -> float:
     try:
@@ -56,12 +62,13 @@ JWT_ALGORITHM = "HS256"
 TOKEN_EXPIRATION_MINUTES = 60
 
 
-def generate_token(app_key: str = None) -> str:
-    """Génère un token JWT valide pour 1 heure."""
+def generate_token(user_id: int, role: str) -> str:
     payload = {
         "iat": datetime.utcnow(),
         "exp": datetime.utcnow() + timedelta(minutes=TOKEN_EXPIRATION_MINUTES),
-        "type": "scanner_token",
+        "type": "access_token",
+        "user_id": user_id,
+        "role": role,
     }
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
@@ -100,6 +107,8 @@ def require_auth(f):
             }), 401
 
         request.jwt_payload = payload
+        request.user_id = payload.get("user_id")
+        request.user_role = payload.get("role")
         return f(*args, **kwargs)
 
     return decorated_function
@@ -148,10 +157,18 @@ def create_app() -> Flask:
     reports_dir = Path(tempfile.gettempdir()) / "a02_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
+
+
     @app.get("/auth/token")
     def get_token():
         """Endpoint public pour obtenir un token JWT (accès local seulement recommandé)."""
-        token = generate_token()
+        system = User.query.filter_by(username="system").first()
+        if not system:
+            system = User(email="system@local", username="system", password_hash=hash_password("system"), role="admin")
+            db.session.add(system)
+            db.session.commit()
+
+        token = generate_token(user_id=system.id, role=system.role)
         return jsonify({
             "token": token,
             "type": "Bearer",
@@ -159,15 +176,77 @@ def create_app() -> Flask:
             "message": "Utilisez ce token dans le header 'Authorization: Bearer <token>' pour les appels suivants",
         })
 
+    @app.post("/auth/register")
+    def register():
+        payload = request.get_json(silent=True) or {}
+        email = (payload.get("email") or "").strip().lower()
+        username = (payload.get("username") or "").strip()
+        password = payload.get("password") or ""
+
+        if not email or not username or not password:
+            return jsonify({"error": "email, username, password requis"}), 400
+
+        if User.query.filter((User.email == email) | (User.username == username)).first():
+            return jsonify({"error": "email ou username déjà utilisé"}), 409
+
+        u = User(
+            email=email,
+            username=username,
+            password_hash=hash_password(password),
+            role="user",
+        )
+        db.session.add(u)
+        db.session.commit()
+
+        token = generate_token(user_id=u.id, role=u.role)
+        return jsonify({"token": token, "type": "Bearer", "expiresIn": TOKEN_EXPIRATION_MINUTES * 60})
+
+    @app.post("/auth/login")
+    def login():
+        payload = request.get_json(silent=True) or {}
+        username = (payload.get("username") or "").strip()
+        password = payload.get("password") or ""
+
+        if not username or not password:
+            return jsonify({"error": "username et password requis"}), 400
+
+        u = User.query.filter_by(username=username).first()
+        if not u:
+            return jsonify({"error": "identifiants invalides"}), 401
+
+        # ⚠️ si tu avais des users de test avec password_hash="x"
+        try:
+            ok = check_password(password, u.password_hash)
+        except Exception:
+            ok = False
+
+        if not ok:
+            return jsonify({"error": "identifiants invalides"}), 401
+
+        token = generate_token(user_id=u.id, role=u.role)
+        return jsonify({"token": token, "type": "Bearer", "expiresIn": TOKEN_EXPIRATION_MINUTES * 60})
+
     @app.post("/auth/renew")
     @require_auth
     def renew_token():
         """Endpoint sécurisé pour renouveler un token (avec token valide)."""
-        new_token = generate_token()
+        user_id = request.jwt_payload.get("user_id")
+        role = request.jwt_payload.get("role", "user")
+        new_token = generate_token(user_id=user_id, role=role)
         return jsonify({
             "token": new_token,
             "type": "Bearer",
             "expiresIn": TOKEN_EXPIRATION_MINUTES * 60,
+        })
+
+    @app.get("/auth/me")
+    @require_auth
+    def me():
+        """Endpoint de diagnostic : affiche l'utilisateur connecté et les infos du token."""
+        return jsonify({
+            "user_id": request.user_id,
+            "role": request.user_role,
+            "payload": request.jwt_payload,
         })
 
     @app.get("/health")
@@ -223,10 +302,12 @@ def create_app() -> Flask:
         generate_pdf = bool(payload.get("generatePdf", False))
 
         # --- DB: créer un scan RUNNING ---
-        system_user_id = get_or_create_system_user_id()
+        user_id = request.user_id
+        if not user_id:
+            return jsonify({"error": "Token invalide: user_id manquant"}), 401
 
         scan_db = ScanRun(
-            user_id=system_user_id,
+            user_id=user_id,
             target=target,
             scan_type=("A02" if not scan_name else f"A02:{scan_name}"),
             status="RUNNING",
@@ -235,14 +316,14 @@ def create_app() -> Flask:
         db.session.add(scan_db)
         db.session.commit()
 
-        log_action(system_user_id, scan_db.id, "SCAN_START", {"target": target, "scan": scan_name or "full"})
+        log_action(user_id, scan_db.id, "SCAN_START", {"target": target, "scan": scan_name or "full"})
 
         def fail(status_code: int, message: str, extra: dict):
             scan_db.status = "ERROR"
             scan_db.finished_at = datetime.utcnow()
             scan_db.error_message = message
             db.session.commit()
-            log_action(system_user_id, scan_db.id, "SCAN_FAILED", {"message": message, **extra})
+            log_action(user_id, scan_db.id, "SCAN_FAILED", {"message": message, **extra})
             return jsonify({"error": message, **extra}), status_code
 
         # --- Fichiers de report (uuid côté fichiers)
@@ -409,7 +490,7 @@ def create_app() -> Flask:
             db.session.add(Artifact(scan_id=scan_db.id, type="md", path=arts["exploitation_guide"]))
 
         db.session.commit()
-        log_action(system_user_id, scan_db.id, "SCAN_DONE", {"scan_uuid": data.get("scan_id")})
+        log_action(user_id, scan_db.id, "SCAN_DONE", {"scan_uuid": data.get("scan_id")})
 
         return jsonify(data)
 

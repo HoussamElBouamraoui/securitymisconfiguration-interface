@@ -118,8 +118,8 @@ def _card(flowables: List[Any], *, accent: colors.Color | None = None, width: fl
 
 
 # Limite de sécurité pour éviter les LayoutError sur pages très chargées
-_MAX_EVIDENCE_LINES_PER_BOX = 28
-_MAX_FINDING_FIELDS_LINES = 18
+_MAX_EVIDENCE_LINES_PER_BOX = 15  # Réduit de 28 à 15 pour éviter LayoutError sur Windows
+_MAX_FINDING_FIELDS_LINES = 12    # Réduit aussi pour cohérence
 
 
 def _cap_evidence_lines(text: str, max_lines: int = _MAX_EVIDENCE_LINES_PER_BOX) -> Dict[str, Any]:
