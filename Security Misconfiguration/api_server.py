@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import traceback
 import uuid
+import requests
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -37,6 +38,84 @@ def hash_password(pw: str) -> str:
 
 def check_password(pw: str, pw_hash: str) -> bool:
     return bcrypt.checkpw(pw.encode("utf-8"), pw_hash.encode("utf-8"))
+
+OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "deepseek-r1:8b")
+
+def clean_ai_response(text: str) -> str:
+    """Nettoie la réponse de l'IA pour supprimer le markdown et les caractères problématiques."""
+    import re
+
+    # 1. Supprimer tous les ** et __ (markdown bold/italic)
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # **texte** -> texte
+    text = re.sub(r'__([^_]+)__', r'\1', text)      # __texte__ -> texte
+    text = re.sub(r'\*\*', '', text)                # ** restants
+    text = re.sub(r'__', '', text)                  # __ restants
+    text = re.sub(r'\*([^*\n]+)\*', r'\1', text)    # *texte* -> texte
+
+    # 2. Supprimer les titres markdown # mais garder le texte
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+
+    # 3. Supprimer les caractères unicode bizarres (chinois, emojis, etc.)
+    # Garde: ASCII de base + caractères français/européens + cyrillique
+    text = re.sub(r'[^\x00-\x7F\u00C0-\u024F\u0400-\u04FF\n\r\t]', '', text)
+
+    # 4. Nettoyer les espaces multiples (mais garder les retours à la ligne)
+    text = re.sub(r' +', ' ', text)
+    text = re.sub(r'\n\n\n+', '\n\n', text)
+
+    # 5. Nettoyer les lignes vides au début/fin
+    text = text.strip()
+
+    return text
+
+def ollama_generate_text(prompt: str, *, temperature: float = 0.2, max_tokens: int = 900) -> str:
+    r = requests.post(
+        f"{OLLAMA_BASE}/api/generate",
+        json={
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            },
+        },
+        timeout=300,
+    )
+    r.raise_for_status()
+    response = r.json().get("response", "")
+    return clean_ai_response(response)
+
+def summarize_report_for_llm(report: dict, max_findings: int = 30) -> str:
+    scan_id = report.get("scan_id") or report.get("scanId") or ""
+    target = report.get("target") or ""
+    risk = report.get("riskScore") or report.get("risk_score") or ""
+    overall = report.get("overallSeverity") or report.get("overall_severity") or ""
+
+    results = report.get("results") or []
+    items = []
+    for mod in results:
+        mod_name = mod.get("moduleName") or mod.get("moduleId") or "module"
+        sev = (mod.get("severity") or "info").upper()
+        for f in (mod.get("findings") or [])[:10]:
+            title = f.get("title") or f.get("name") or f.get("rule") or "Finding"
+            evidence = f.get("evidence") or f.get("details") or ""
+            if not isinstance(evidence, str):
+                evidence = str(evidence)
+            evidence = evidence[:300]
+            rec = f.get("recommendation") or f.get("fix") or ""
+            if not isinstance(rec, str):
+                rec = str(rec)
+            rec = rec[:220]
+            items.append(f"- [{sev}] {mod_name}: {title}\n  evidence: {evidence}\n  fix: {rec}")
+            if len(items) >= max_findings:
+                break
+        if len(items) >= max_findings:
+            break
+
+    header = f"scan_id={scan_id}\ntarget={target}\nriskScore={risk}\noverallSeverity={overall}\n"
+    return header + "\n".join(items)
 
 def _safe_float(v: Any, default: float) -> float:
     try:
@@ -279,6 +358,8 @@ def create_app() -> Flask:
             for s in items
         ])
 
+
+
     @app.post("/scan")
     @require_auth
     def scan():
@@ -517,6 +598,102 @@ def create_app() -> Flask:
         if not p.exists():
             return jsonify({"error": "guide introuvable"}), 404
         return send_file(str(p), mimetype="text/markdown; charset=utf-8")
+
+    @app.post("/ai/chat")
+    @require_auth
+    def ai_chat():
+        """Endpoint pour dialoguer avec l'IA (analyse rapport ou question ouverte)."""
+        payload = request.get_json(silent=True) or {}
+        mode = payload.get("mode", "ask")  # "ask" ou "report"
+        scan_id = payload.get("scan_id")
+        question = payload.get("question", "")
+        language = payload.get("language", "fr")
+        depth = payload.get("depth", "normal")  # normal ou deep
+
+        if mode == "report":
+            # Analyse d'un rapport de scan
+            if not scan_id:
+                return jsonify({"error": "scan_id requis pour mode=report"}), 400
+
+            # Charger le rapport JSON
+            json_path = reports_dir / f"scan-{scan_id}.json"
+            if not json_path.exists():
+                return jsonify({"error": f"Rapport {scan_id} introuvable"}), 404
+
+            try:
+                report_data = json.loads(json_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                return jsonify({"error": f"Impossible de lire le rapport: {e}"}), 500
+
+            # Résumer le rapport pour le LLM
+            summary = summarize_report_for_llm(report_data, max_findings=50 if depth == "deep" else 30)
+
+            prompt = f"""Tu es un expert en cybersécurité. Analyse ce rapport de scan OWASP A02 (Security Misconfiguration).
+
+Rapport:
+{summary}
+
+IMPORTANT: Réponds en TEXTE BRUT UNIQUEMENT (pas de markdown, pas de **, pas de #, pas de symboles spéciaux).
+
+Instructions:
+- Langue: {language}
+- Résumé exécutif: 2-3 phrases
+- Liste des vulnérabilités CRITIQUES avec impacts
+- Recommandations prioritaires (quick wins)
+- Format: retours à la ligne + listes à puces simples (- item)
+- Mets les concepts clés en MAJUSCULES (exemple: OWASP, TLS, CORS)
+- Pas de markdown, pas de gras, pas de symboles fantaisie
+- Sois concis et précis
+
+Analyse (texte brut):"""
+
+            try:
+                answer = ollama_generate_text(prompt, temperature=0.3, max_tokens=1200)
+                log_action(request.user_id, None, "AI_ANALYZE_REPORT", {"scan_id": scan_id, "depth": depth})
+                return jsonify({"answer": answer.strip(), "mode": "report", "scan_id": scan_id})
+            except Exception as e:
+                return jsonify({"error": f"Erreur IA: {e}"}), 500
+
+        elif mode == "ask":
+            # Question ouverte (avec contexte optionnel du scan)
+            if not question:
+                return jsonify({"error": "question requise pour mode=ask"}), 400
+
+            context = ""
+            if scan_id:
+                json_path = reports_dir / f"scan-{scan_id}.json"
+                if json_path.exists():
+                    try:
+                        report_data = json.loads(json_path.read_text(encoding="utf-8"))
+                        context = f"\n\nContexte du dernier scan:\n{summarize_report_for_llm(report_data, max_findings=15)}"
+                    except Exception:
+                        pass
+
+            prompt = f"""Tu es un assistant expert en cybersécurité et pentesting.
+
+Question: {question}{context}
+
+IMPORTANT: Réponds en TEXTE BRUT UNIQUEMENT (pas de markdown, pas de **, pas de #, pas de symboles spéciaux).
+
+Règles:
+- Langue: {language}
+- Si question hors cybersécurité: réponds "Désolé, je suis spécialisé en sécurité informatique uniquement"
+- Structure: retours à la ligne + listes à puces simples (- item)
+- Mets les concepts clés en MAJUSCULES (exemple: OWASP, SQL, XSS)
+- Format: texte simple, clair, technique
+- Pas de markdown, pas de gras, pas de symboles fantaisie
+
+Réponse (texte brut):"""
+
+            try:
+                answer = ollama_generate_text(prompt, temperature=0.4, max_tokens=800)
+                log_action(request.user_id, None, "AI_ASK", {"question": question[:200], "has_context": bool(context)})
+                return jsonify({"answer": answer.strip(), "mode": "ask"})
+            except Exception as e:
+                return jsonify({"error": f"Erreur IA: {e}"}), 500
+
+        else:
+            return jsonify({"error": f"mode inconnu: {mode}"}), 400
 
     return app
 

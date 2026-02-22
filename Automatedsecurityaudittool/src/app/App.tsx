@@ -38,6 +38,10 @@ export default function App() {
     const [scanResults, setScanResults] = useState<AggregatedResults | null>(null);
     const [scanStartedAt, setScanStartedAt] = useState<Date | null>(null);
 
+    // --- AI workflow states ---
+    const [lastScanId, setLastScanId] = useState<string | null>(null);
+    const [pendingAiPrompt, setPendingAiPrompt] = useState<null | { scanId: string }>(null);
+
     // --- Auth state (Linux terminal style) ---
     const [token, setToken] = useState<string | null>(() => localStorage.getItem('token'));
     const [authStep, setAuthStep] = useState<AuthStep>(() => (localStorage.getItem('token') ? 'idle' : 'login_username'));
@@ -146,6 +150,8 @@ export default function App() {
             '  scanmod <module> <target>  Lance un module A02 spécifique (sous-scan)',
             '                    Ex: scanmod port_scanner_aggressive 127.0.0.1',
             '  scans             Affiche la liste des sous-scans/modules disponibles',
+            '  askai <question>  Poser une question à l\'IA (contexte du dernier scan si dispo)',
+            '                    Ex: askai comment exploiter SQLi ?',
             '  whoami            Affiche les infos de l\'utilisateur connecté',
             '  logout            Déconnexion',
             '  clear             Efface le terminal',
@@ -307,6 +313,14 @@ export default function App() {
         }
     }
 
+    // --- Fonction pour appeler l'IA ---
+    async function callAiChat(body: any) {
+        return await apiFetch('/ai/chat', {
+            method: 'POST',
+            body: JSON.stringify(body)
+        });
+    }
+
     // --- Main command handler ---
     const handleCommand = (command: string) => {
         // ✅ Echo terminal input (mais masque password)
@@ -319,10 +333,87 @@ export default function App() {
             return;
         }
 
+        // ⭐ Si on attend une réponse oui/non pour l'analyse IA post-scan
+        if (pendingAiPrompt) {
+            const ans = command.trim().toLowerCase();
+            if (ans === 'oui' || ans === 'o' || ans === 'y' || ans === 'yes') {
+                setIsProcessing(true);
+                pushInfo('AI: analyse du rapport en cours...');
+
+                (async () => {
+                    try {
+                        const data = await callAiChat({
+                            mode: 'report',
+                            scan_id: pendingAiPrompt.scanId,
+                            depth: 'deep',
+                            language: 'fr'
+                        });
+                        pushOut(data.answer);
+                    } catch (e: any) {
+                        if (e instanceof AuthRequiredError) {
+                            pushErr('Session expirée/invalide. Merci de vous reconnecter.');
+                            logout();
+                            return;
+                        }
+                        pushErr(e?.message || String(e));
+                    } finally {
+                        setIsProcessing(false);
+                        setPendingAiPrompt(null);
+                    }
+                })();
+
+                return; // IMPORTANT: ne pas traiter comme commande normale
+            }
+
+            if (ans === 'non' || ans === 'n' || ans === 'no') {
+                pushInfo('OK. Analyse IA ignorée.');
+                setPendingAiPrompt(null);
+                return;
+            }
+
+            pushErr('Réponds par "oui" ou "non".');
+            return;
+        }
+
         // Authenticated normal commands
         const parts = command.split(' ');
         const cmd = parts[0].toLowerCase();
         const args = parts.slice(1);
+
+        // ⭐ Commande ASKAI (question ouverte)
+        if (cmd === 'askai') {
+            const q = args.join(' ').trim();
+            if (!q) {
+                pushErr('Usage: askai <ta question...>');
+                return;
+            }
+
+            setIsProcessing(true);
+            pushInfo('AI: réponse en cours...');
+
+            (async () => {
+                try {
+                    const data = await callAiChat({
+                        mode: 'ask',
+                        question: q,
+                        scan_id: lastScanId, // contexte du dernier scan si dispo
+                        language: 'fr'
+                    });
+                    pushOut(data.answer);
+                } catch (e: any) {
+                    if (e instanceof AuthRequiredError) {
+                        pushErr('Session expirée/invalide. Merci de vous reconnecter.');
+                        logout();
+                        return;
+                    }
+                    pushErr(e?.message || String(e));
+                } finally {
+                    setIsProcessing(false);
+                }
+            })();
+
+            return;
+        }
 
         switch (cmd) {
             case 'help':
@@ -438,6 +529,14 @@ export default function App() {
                     pushOk('PDF généré côté serveur (bouton Export PDF disponible)');
                 } else {
                     pushErr('PDF non généré côté serveur. Vérifiez le backend (logs) et relancez le scan.');
+                }
+
+                // ⭐ Prompt IA après scan terminé
+                const scanId = (data?.scan_id || data?.scanId || aggregated?.scanId) ?? null;
+                if (scanId) {
+                    setLastScanId(scanId);
+                    pushInfo('Est-ce que tu veux une analyse IA du rapport ? (oui/non)');
+                    setPendingAiPrompt({ scanId });
                 }
             })
             .catch((error) => {
