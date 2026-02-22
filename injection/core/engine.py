@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 """
-🎯 Moteur principal — Générique + gestion IP attaquant intégrée
-Intègre tes techniques de scan_forms.py, scan_get_vuln.py, etc.
+Moteur principal OWASP A05:2025 — Session, découverte de paramètres, exfiltration.
+Mode rapide + parallélisation pour scans agressifs. Usage strictement autorisé.
 """
 
+import random
 import requests
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, parse_qs, urlencode
 from colorama import Fore, Style
 from utils.network import detect_attacker_endpoint
 from core.exfil import ExfilServer
 
 class InjectionEngine:
-    def __init__(self, target_url, attacker_url=None, port=8888, aggressive=False, stealth=False):
+    def __init__(self, target_url, attacker_url=None, port=8888, aggressive=False, stealth=False, fast=False, parallel_workers=0, exploit=False):
         self.url = target_url
         self.stealth = stealth
         self.port = port
         self.aggressive = aggressive
+        self.fast = fast
+        self.exploit = exploit
+        # Parallèle : 0 = séquentiel, 1+ = nombre de workers (recommandé 4–8 en fast)
+        self.parallel_workers = parallel_workers if parallel_workers > 0 else (6 if fast else 0)
+        # Timeout adaptatif : plus court en fast pour accélérer
+        self.request_timeout = 5 if fast else 12
+        self.baseline_timeout = 8 if fast else 30
         self.session = requests.Session()
         self.all_cookies = {}  # Stocker TOUS les cookies détectés
         self.session_variations = []  # Stocker les variations de sessions
@@ -38,7 +47,9 @@ class InjectionEngine:
         })
         
         self.baseline_resp = None
-        
+        self._evasion = None
+        self._ai_detector = None
+
         # Serveur d'exfiltration (seulement si pas mode furtif)
         if not stealth:
             self.exfil_server = ExfilServer(port)
@@ -67,9 +78,12 @@ class InjectionEngine:
         return random.choice(uas)
     
     def get_baseline(self):
-        """Obtenir réponse de référence"""
+        """Obtenir réponse de référence. Lève requests.RequestException si connexion échoue."""
         if not self.baseline_resp:
-            self.baseline_resp = self.session.get(self.url, timeout=30)
+            try:
+                self.baseline_resp = self.session.get(self.url, timeout=getattr(self, "baseline_timeout", 30))
+            except requests.RequestException as e:
+                raise requests.RequestException(f"Baseline request failed: {e}") from e
         return self.baseline_resp
     
     def discover_params(self):
@@ -79,21 +93,20 @@ class InjectionEngine:
         return list(params.keys()) if params else []
     
     def discover_form_params(self):
-        """Découvrir paramètres dans les formulaires (inspiré de scan_forms.py)"""
-        from bs4 import BeautifulSoup
+        """Découvrir paramètres dans les formulaires."""
         try:
-            resp = self.session.get(self.url, timeout=30)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            forms = soup.find_all('form')
-            
+            from bs4 import BeautifulSoup
+            resp = self.session.get(self.url, timeout=getattr(self, "baseline_timeout", 30))
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
             params = []
-            for form in forms:
-                inputs = form.find_all(['input', 'textarea', 'select'])
-                for inp in inputs:
-                    if inp.get('name'):
-                        params.append(inp.get('name'))
+            for form in soup.find_all("form"):
+                for inp in form.find_all(["input", "textarea", "select"]):
+                    name = inp.get("name")
+                    if name:
+                        params.append(name)
             return list(set(params))
-        except:
+        except Exception:
             return []
     
     def build_url(self, param, payload):
@@ -212,9 +225,9 @@ class InjectionEngine:
                     }
                     self.session_variations.append(session_info)
                 
-            except Exception as e:
+            except requests.RequestException:
                 continue
-        
+
         # Afficher les résultats
         if self.all_cookies:
             print(f"{Fore.GREEN}[+] {Style.RESET_ALL}🍪 {len(self.all_cookies)} cookies uniques découverts")
@@ -231,7 +244,55 @@ class InjectionEngine:
     def get_session_variations(self):
         """Retourner les variations de sessions"""
         return self.session_variations
+
+    def get_evasion(self):
+        """Retourner l'instance AdvancedEvasion (lazy)."""
+        if self._evasion is None:
+            from core.evasion_advanced import AdvancedEvasion
+            self._evasion = AdvancedEvasion(self, aggressive=self.aggressive)
+        return self._evasion
+
+    def get_ai_detector(self):
+        """Retourner l'instance AIInjectionDetector (lazy)."""
+        if self._ai_detector is None:
+            from core.ai_detector import AIInjectionDetector
+            self._ai_detector = AIInjectionDetector(self, aggressive=self.aggressive)
+        return self._ai_detector
     
+    def get(self, url, timeout=None, **kwargs):
+        """Requête GET avec timeout du moteur par défaut."""
+        return self.session.get(url, timeout=timeout if timeout is not None else self.request_timeout, **kwargs)
+
+    def run_payloads_parallel(self, param, payloads, check_response, skip_time_based=True):
+        """
+        Exécute les payloads en parallèle (sauf time-based si skip_time_based).
+        check_response(injected_url, payload, response) → (is_vuln, vuln_dict or None).
+        Retourne (vuln_dict, winning_payload) au premier succès, sinon (None, None).
+        """
+        if not self.parallel_workers or not payloads:
+            return None, None
+        to_run = []
+        for p in payloads:
+            if skip_time_based and ("SLEEP" in p.upper() or "BENCHMARK" in p.upper() or "WAITFOR" in p.upper()):
+                continue
+            url = self.build_url(param, p)
+            if url:
+                to_run.append((url, p))
+        if not to_run:
+            return None, None
+        with ThreadPoolExecutor(max_workers=min(self.parallel_workers, len(to_run))) as ex:
+            futures = {ex.submit(self.get, url): (url, p) for url, p in to_run}
+            for fut in as_completed(futures):
+                url, p = futures[fut]
+                try:
+                    resp = fut.result()
+                    is_vuln, vuln = check_response(url, p, resp)
+                    if is_vuln and vuln:
+                        return vuln, p
+                except Exception:
+                    pass
+        return None, None
+
     def stop(self):
         """Arrêter proprement"""
         if self.exfil_server:

@@ -11,8 +11,9 @@ import base64
 from colorama import Fore, Style
 
 class WAFevasion:
-    def __init__(self, aggressive=False):
+    def __init__(self, aggressive=False, session=None):
         self.aggressive = aggressive
+        self._session = session  # requests.Session optionnel pour test_evasion_effectiveness
         self.evasion_techniques = [
             self._url_encode,
             self._double_url_encode,
@@ -257,27 +258,27 @@ class WAFevasion:
         
         return chain[-1], chain  # Retourne payload final + chaîne complète
     
-    def test_evasion_effectiveness(self, original_payload, evaded_payload, url, param):
+    def set_session(self, session):
+        """Injecter la session requests pour test_evasion_effectiveness."""
+        self._session = session
+
+    def test_evasion_effectiveness(self, original_payload, evaded_payload, url, param, session=None):
         """
-        Teste si l'evasion fonctionne (payload échappé atteint la cible)
+        Teste si l'evasion fonctionne (payload échappé atteint la cible).
+        Utilise session si fourni, sinon self._session.
         """
+        sess = session or self._session
+        if sess is None:
+            return False, "Aucune session requests fournie pour le test"
         try:
-            # Tester payload original (doit être bloqué si WAF présent)
-            original_url = f"{url}?{param}={urllib.parse.quote(original_payload)}"
-            original_resp = self.session.get(original_url, timeout=5)
-            
-            # Tester payload échappé
-            evaded_url = f"{url}?{param}={urllib.parse.quote(evaded_payload)}"
-            evaded_resp = self.session.get(evaded_url, timeout=5)
-            
-            # Comparer les réponses
+            original_url = f"{url}?{param}={urllib.parse.quote(original_payload, safe='')}"
+            evaded_url = f"{url}?{param}={urllib.parse.quote(evaded_payload, safe='')}"
+            original_resp = sess.get(original_url, timeout=5)
+            evaded_resp = sess.get(evaded_url, timeout=5)
             if original_resp.status_code != evaded_resp.status_code:
                 return True, f"Évasion réussie: {original_resp.status_code} → {evaded_resp.status_code}"
-            
             if 'blocked' in original_resp.text.lower() and 'blocked' not in evaded_resp.text.lower():
                 return True, "Évasion réussie: payload bloqué → payload accepté"
-            
             return False, "Évasion non nécessaire ou échouée"
-        
         except Exception as e:
             return False, f"Erreur test: {e}"

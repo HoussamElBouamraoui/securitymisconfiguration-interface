@@ -7,6 +7,7 @@ Intègre tes techniques de scan_get_vuln.py
 
 import time
 import re
+import requests
 from colorama import Fore, Style
 
 class AdvancedDetector:
@@ -46,16 +47,12 @@ class AdvancedDetector:
                 try:
                     true_resp = self.session.get(true_url, timeout=10)
                     false_resp = self.session.get(false_url, timeout=10)
-                    
-                    # Analyse polymorphique de différence
                     similarity = self._calculate_similarity(true_resp.text, false_resp.text)
                     content_diff = self._content_differs(true_resp.text, false_resp.text)
-                    
                     if similarity < 0.6 or content_diff:
                         evidence = f"Boolean-based blind détecté (similarité={similarity:.2f})"
                         return True, evidence, true_p
-                
-                except:
+                except requests.exceptions.RequestException:
                     continue
         
         elif technique == 'time':
@@ -91,7 +88,7 @@ class AdvancedDetector:
                 except requests.exceptions.Timeout:
                     evidence = "Time-based blind détecté (timeout)"
                     return True, evidence, payload
-                except:
+                except requests.exceptions.RequestException:
                     continue
         
         return False, "Aucune vulnérabilité aveugle détectée", None
@@ -207,9 +204,8 @@ class AdvancedDetector:
                     if test_resp.status_code in [403, 406, 429, 503] or 'blocked' in test_resp.text.lower():
                         return "WAF inconnu (blocage détecté)"
         
-        except:
+        except requests.exceptions.RequestException:
             pass
-        
         return None
     
     def adaptive_scan(self, param, aggressive=False):
@@ -247,7 +243,7 @@ class AdvancedDetector:
                 has_error, error_evidence = self.detect_error_based(resp.text)
                 if has_error:
                     return True, f"Error-based: {error_evidence}", payload
-            except:
+            except requests.exceptions.RequestException:
                 continue
         
         return False, "Aucune vulnérabilité détectée", None

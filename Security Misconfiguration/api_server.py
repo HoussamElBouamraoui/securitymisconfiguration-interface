@@ -15,9 +15,12 @@ import subprocess
 import tempfile
 import traceback
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
+from functools import wraps
 
+import jwt
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
@@ -43,6 +46,63 @@ def _safe_int(v: Any, default: int) -> int:
         return default
 
 
+# Clé secrète pour JWT (utiliser une variable d'env en production!)
+JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "dev-secret-key-change-in-production")
+JWT_ALGORITHM = "HS256"
+TOKEN_EXPIRATION_MINUTES = 60
+
+
+def generate_token(app_key: str = None) -> str:
+    """Génère un token JWT valide pour 1 heure."""
+    payload = {
+        "iat": datetime.utcnow(),
+        "exp": datetime.utcnow() + timedelta(minutes=TOKEN_EXPIRATION_MINUTES),
+        "type": "scanner_token"
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def verify_token(token: str) -> Dict[str, Any] | None:
+    """Vérifie et décode un token JWT. Retourne le payload ou None si invalide."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        return payload
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
+
+def require_auth(f):
+    """Décorateur pour vérifier l'authentification via token JWT dans le header Authorization."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+
+        # Format: "Bearer <token>"
+        if not auth_header.startswith("Bearer "):
+            return jsonify({
+                "error": "Authentification requise",
+                "message": "Veuillez fournir un token JWT via le header 'Authorization: Bearer <token>'",
+                "hint": "Obtenez un token via GET /auth/token"
+            }), 401
+
+        token = auth_header[7:]  # Enlever "Bearer "
+
+        payload = verify_token(token)
+        if payload is None:
+            return jsonify({
+                "error": "Token invalide ou expiré",
+                "message": "Le token JWT n'est pas valide ou a expiré"
+            }), 401
+
+        # Passer le payload au endpoint
+        request.jwt_payload = payload
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     CORS(app, resources={r"/*": {"origins": "*"}})
@@ -53,11 +113,35 @@ def create_app() -> Flask:
     reports_dir = Path(tempfile.gettempdir()) / "a02_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
+    @app.get("/auth/token")
+    def get_token():
+        """Endpoint public pour obtenir un token JWT (accès local seulement recommandé)."""
+        token = generate_token()
+        return jsonify({
+            "token": token,
+            "type": "Bearer",
+            "expiresIn": TOKEN_EXPIRATION_MINUTES * 60,  # en secondes
+            "message": "Utilisez ce token dans le header 'Authorization: Bearer <token>' pour les appels suivants"
+        })
+
+    @app.post("/auth/renew")
+    @require_auth
+    def renew_token():
+        """Endpoint sécurisé pour renouveler un token (avec token valide)."""
+        new_token = generate_token()
+        return jsonify({
+            "token": new_token,
+            "type": "Bearer",
+            "expiresIn": TOKEN_EXPIRATION_MINUTES * 60
+        })
+
     @app.get("/health")
     def health():
-        return jsonify({"status": "ok"})
+        """Endpoint health check (pas d'authentification requise)."""
+        return jsonify({"status": "ok", "version": "1.0.0"})
 
     @app.get("/scans")
+    @require_auth
     def scans():
         # Liste officielle des sous-scans disponibles côté backend.
         return jsonify({
@@ -66,6 +150,7 @@ def create_app() -> Flask:
         })
 
     @app.post("/scan")
+    @require_auth
     def scan():
         payload = request.get_json(silent=True) or {}
         target = (payload.get("target") or "").strip()
@@ -251,6 +336,7 @@ def create_app() -> Flask:
         return jsonify(data)
 
     @app.get("/reports/<scan_id>.json")
+    @require_auth
     def get_report_json(scan_id: str):
         p = reports_dir / f"scan-{scan_id}.json"
         if not p.exists():
@@ -258,6 +344,7 @@ def create_app() -> Flask:
         return send_file(str(p), mimetype="application/json")
 
     @app.get("/reports/<scan_id>.pdf")
+    @require_auth
     def get_report_pdf(scan_id: str):
         p = reports_dir / f"scan-{scan_id}.pdf"
         if not p.exists():
@@ -265,6 +352,7 @@ def create_app() -> Flask:
         return send_file(str(p), mimetype="application/pdf")
 
     @app.get("/reports/<scan_id>_EXPLOITATION_GUIDE.md")
+    @require_auth
     def get_exploitation_guide(scan_id: str):
         p = reports_dir / f"scan-{scan_id}_EXPLOITATION_GUIDE.md"
         if not p.exists():

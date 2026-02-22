@@ -1,0 +1,162 @@
+{
+  "target": "http://testphp.vulnweb.com/",
+  "vulnerabilities": [
+    {
+      "type": "sqli",
+      "cwe": "CWE-89",
+      "param": "searchFor",
+      "payload": "'",
+      "url": "http://testphp.vulnweb.com/?searchFor=%27",
+      "evidence": "Différence de contenu/statut après injection",
+      "backend": null
+    },
+    {
+      "type": "sqli",
+      "cwe": "CWE-89",
+      "param": "goButton",
+      "payload": "1\"",
+      "url": "http://testphp.vulnweb.com/?goButton=1%22",
+      "evidence": "Différence de contenu/statut après injection",
+      "backend": null
+    },
+    {
+      "type": "xss",
+      "cwe": "CWE-79",
+      "param": "searchFor",
+      "payload": "<script>alert(1)</script>",
+      "url": "http://testphp.vulnweb.com/search.php?test=query",
+      "evidence": "XSS reflete (POST) - payload present dans la reponse",
+      "method": "POST"
+    },
+    {
+      "type": "form",
+      "form_id": 1,
+      "action": "search.php?test=query",
+      "method": "POST",
+      "sensitive_fields": [],
+      "csrf_protected": false,
+      "https": false
+    },
+    {
+      "type": "admin",
+      "path": "http://testphp.vulnweb.com/admin/",
+      "evidence": "Page admin accessible"
+    },
+    {
+      "type": "admin",
+      "path": "http://testphp.vulnweb.com/login.php",
+      "evidence": "Page admin accessible"
+    },
+    {
+      "type": "missing_security_headers",
+      "missing_headers": [
+        "X-Frame-Options",
+        "X-XSS-Protection",
+        "X-Content-Type-Options",
+        "Strict-Transport-Security",
+        "Content-Security-Policy",
+        "Referrer-Policy",
+        "Feature-Policy",
+        "Permissions-Policy"
+      ],
+      "evidence": "Missing 8 security headers",
+      "url": "http://testphp.vulnweb.com/"
+    },
+    {
+      "type": "backup_file_exposed",
+      "file": "http://testphp.vulnweb.com/index.bak",
+      "size": 3265,
+      "evidence": "Backup file exposed: .bak",
+      "url": "http://testphp.vulnweb.com/index.bak"
+    },
+    {
+      "type": "backup_file_exposed",
+      "file": "http://testphp.vulnweb.com/index.zip",
+      "size": 2442,
+      "evidence": "Backup file exposed: .zip",
+      "url": "http://testphp.vulnweb.com/index.zip"
+    },
+    {
+      "type": "directory_listing",
+      "directory": "/images/",
+      "evidence": "Directory listing enabled: /images/",
+      "url": "http://testphp.vulnweb.com/images/"
+    },
+    {
+      "type": "directory_listing",
+      "directory": "/admin/",
+      "evidence": "Directory listing enabled: /admin/",
+      "url": "http://testphp.vulnweb.com/admin/"
+    },
+    {
+      "type": "asvs_violation",
+      "requirement": "V1.2.1 - X-Frame-Options",
+      "severity": "medium",
+      "evidence": "Missing security header: X-Frame-Options",
+      "url": "http://testphp.vulnweb.com/"
+    },
+    {
+      "type": "asvs_violation",
+      "requirement": "V1.2.1 - X-XSS-Protection",
+      "severity": "medium",
+      "evidence": "Missing security header: X-XSS-Protection",
+      "url": "http://testphp.vulnweb.com/"
+    },
+    {
+      "type": "asvs_violation",
+      "requirement": "V1.2.1 - X-Content-Type-Options",
+      "severity": "medium",
+      "evidence": "Missing security header: X-Content-Type-Options",
+      "url": "http://testphp.vulnweb.com/"
+    },
+    {
+      "type": "asvs_violation",
+      "requirement": "V1.2.1 - Strict-Transport-Security",
+      "severity": "medium",
+      "evidence": "Missing security header: Strict-Transport-Security",
+      "url": "http://testphp.vulnweb.com/"
+    },
+    {
+      "type": "asvs_violation",
+      "requirement": "V1.2.1 - Content-Security-Policy",
+      "severity": "medium",
+      "evidence": "Missing security header: Content-Security-Policy",
+      "url": "http://testphp.vulnweb.com/"
+    },
+    {
+      "type": "asvs_violation",
+      "requirement": "V1.2.1 - Referrer-Policy",
+      "severity": "medium",
+      "evidence": "Missing security header: Referrer-Policy",
+      "url": "http://testphp.vulnweb.com/"
+    },
+    {
+      "type": "asvs_violation",
+      "requirement": "V1.3.1 - HTTPS",
+      "severity": "high",
+      "evidence": "Application not using HTTPS",
+      "url": "http://testphp.vulnweb.com/"
+    },
+    {
+      "type": "asvs_violation",
+      "requirement": "V1.8.1 - Access control",
+      "severity": "high",
+      "evidence": "Unprotected admin endpoint: /admin",
+      "url": "http://testphp.vulnweb.com/admin"
+    },
+    {
+      "type": "asvs_violation",
+      "requirement": "V1.8.1 - Access control",
+      "severity": "high",
+      "evidence": "Unprotected admin endpoint: /admin/",
+      "url": "http://testphp.vulnweb.com/admin/"
+    },
+    {
+      "type": "asvs_violation",
+      "requirement": "V1.12.1 - Data protection",
+      "severity": "high",
+      "evidence": "PII data exposed: \\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}\\b",
+      "url": "http://testphp.vulnweb.com/"
+    }
+  ]
+}

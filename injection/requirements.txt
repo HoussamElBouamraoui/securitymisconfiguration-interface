@@ -1,15 +1,25 @@
-# InjectionHunter v3.0 - OWASP A05:2025 Scanner Dependencies
-requests==2.31.0
-beautifulsoup4==4.12.2
-colorama==0.4.6
-lxml==4.9.3
-argparse
-urllib3==2.0.7
-threading
-socket
-json
-time
-re
-html
-sys
-os
+# InjectionHunter
+# INJECTIONHUNTER v4.0 - OWASP A05:2025 Spécialiste
+# Dépendances pour scanner de sécurité ULTRA-AGRESSIF
+
+# Core HTTP & Web
+requests>=2.31.0
+urllib3>=2.0.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# WebSocket Support
+websockets>=11.0.0
+aiohttp>=3.8.0
+
+# Machine Learning & AI
+scikit-learn>=1.3.0
+numpy>=1.24.0
+
+# Color & Terminal
+colorama>=0.4.6
+
+# Reporting PDF (réutilise le moteur A02)
+reportlab>=4.0.0
+pdfplumber>=0.10.0
+Pillow>=10.0.0

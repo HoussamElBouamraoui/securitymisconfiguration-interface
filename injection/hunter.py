@@ -1,16 +1,30 @@
 #!/usr/bin/env python3
 """
-💉 INJECTIONHUNTER ULTRA-AGRESSIF v3.0 — OWASP A05:2025 COMPLET
-Détection + Exploitation Maximale de TOUTES les vulnérabilités d'injection
+INJECTIONHUNTER — OWASP Top 10 A05:2025 Injection (37 CWEs, 62k+ CVEs).
+Détection agressive: SQLi, XSS, CMDi, LFI, LDAP, XPath, ORM, SSTI, SSRF,
+désérialisation, WebSocket, config, ASVS. Usage strictement autorisé.
 """
 
 import argparse
+import os
 import sys
 import time
+
+# Encodage UTF-8 pour Windows (évite UnicodeEncodeError sur banner)
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 from colorama import Fore, Style, init
 init(autoreset=True)
 
-# Core
+from constants import DEFAULT_INJECTION_PARAM_NAMES, OWASP_A05_2025_ID
 from core.engine import InjectionEngine
 from core.detector import AdvancedDetector
 
@@ -27,13 +41,35 @@ from modules.admin_finder import AdminFinder
 from modules.cms_detector import CMSDetector
 from modules.cookies_analyzer_v3 import CookiesAnalyzerV3
 
+# Nouveaux modules v4.0 - OWASP A05:2025 Spécialiste
+from modules.template_injection import TemplateInjection
+from modules.ssrf_detector import SSRFDetector
+from modules.deserialization import Deserialization
+from modules.websocket_injection import WebSocketInjection
+from modules.config_auditor import ConfigAuditor
+from modules.asvs_compliance import ASVSCompliance
+
+# Core avancé (lazy via engine.get_ai_detector() / engine.get_evasion())
+# from core.ai_detector import AIInjectionDetector
+# from core.evasion_advanced import AdvancedEvasion
+
+# Cibles autorisées pour --test-authorized (sites de test connus)
+AUTHORIZED_TEST_TARGETS = [
+    "http://testphp.vulnweb.com",
+    "https://testphp.vulnweb.com",
+    "http://dvwa",
+    "http://localhost",
+    "http://127.0.0.1",
+]
+
+
 def banner():
     print(f"""
-{Fore.RED}╔══════════════════════════════════════════════════════════════════════════╗
-{Fore.RED}║{Fore.YELLOW}  💀 INJECTIONHUNTER v3.0 ULTRA-AGRESSIF — OWASP A05:2025 COMPLET     {Fore.RED}    ║
-{Fore.RED}║{Fore.GREEN}  TOUTES les vulnérabilités d'injection — Détection + Exploitation MAX  {Fore.RED}  ║
-{Fore.RED}║{Fore.CYAN}  ⚠️  Usage STRICTEMENT autorisé sur sites avec consentement écrit     {Fore.RED}    ║
-{Fore.RED}╚══════════════════════════════════════════════════════════════════════════╝{Style.RESET_ALL}
+{Fore.RED}+----------------------------------------------------------------------+
+{Fore.RED}|{Fore.YELLOW}  INJECTIONHUNTER v3.0 ULTRA-AGRESSIF - OWASP A05:2025 COMPLET       {Fore.RED}  |
+{Fore.RED}|{Fore.GREEN}  Vulnerabilites d'injection - Detection + Exploitation MAX        {Fore.RED}  |
+{Fore.RED}|{Fore.CYAN}  {OWASP_A05_2025_ID} - Usage STRICTEMENT autorise (consentement ecrit)          {Fore.RED}  |
+{Fore.RED}+----------------------------------------------------------------------+{Style.RESET_ALL}
 """)
 
 def tool_info():
@@ -104,11 +140,25 @@ def main():
     parser = argparse.ArgumentParser(description="Scanner OWASP A05:2025 ULTRA-AGRESSIF")
     parser.add_argument("-u", "--url", required=True, help="URL cible (ex: https://site.com ou https://site.com/page?id=1)")
     parser.add_argument("-m", "--modules", default="all", 
-                        help="Modules: sqli,xss,cmdi,lfi,ldap,xpath,orm,forms,admin,cms,cookies (défaut: all)")
+                        help="Modules: sqli,xss,cmdi,lfi,ldap,xpath,orm,forms,admin,cms,cookies,template,ssrf,deserialization,websocket,config,asvs (défaut: all)")
     parser.add_argument("--attacker-url", help="URL publique attaquant (ex: https://abc123.ngrok.io)")
     parser.add_argument("--stealth", action="store_true", help="Mode furtif - pas de serveur d'exfiltration XSS")
-    parser.add_argument("--aggressive", action="store_true", help="Mode ULTRA-AGRESSIF (payloads polymorphiques + evasion WAF)")
+    parser.add_argument("--aggressive", action="store_true", help="Mode ULTRA-AGRESSIF (payloads polymorphiques + évasion WAF)")
+    parser.add_argument("--fast", action="store_true", help="Mode RAPIDE: timeouts courts, parallélisation, moins de payloads par défaut")
+    parser.add_argument("--exploit", action="store_true", help="Phase exploitation: tenter extraction/confirmation après détection (ex: SQLi version/DB)")
+    parser.add_argument("--test-authorized", action="store_true", help="Test uniquement si l'URL est dans la liste autorisee")
+    parser.add_argument("--out-json", metavar="FILE", help="Exporter les vulnerabilites en JSON (target + vulnerabilities)")
+    parser.add_argument("--out-pdf", metavar="FILE", help="Generer en plus un rapport PDF style client (logo Injection, lecture facile)")
     args = parser.parse_args()
+
+    if args.test_authorized:
+        allowed = os.environ.get("INJECTION_ALLOWED_TARGETS", "").strip().split(",") if os.environ.get("INJECTION_ALLOWED_TARGETS") else AUTHORIZED_TEST_TARGETS
+        allowed = [u.strip().rstrip("/") for u in allowed if u.strip()]
+        base_url = args.url.split("?")[0].rstrip("/")
+        if not any(base_url.startswith(a) or a in base_url for a in allowed):
+            print(f"{Fore.RED}[X] URL non autorisee pour --test-authorized. Cibles: {allowed}{Style.RESET_ALL}")
+            sys.exit(2)
+        print(f"{Fore.GREEN}[OK] Test autorise: {base_url}{Style.RESET_ALL}")
     
     print(f"\n{Fore.CYAN}[TARGET] {Style.RESET_ALL}{args.url}")
     if args.attacker_url:
@@ -116,26 +166,38 @@ def main():
     elif args.stealth:
         print(f"{Fore.GREEN}[MODE] {Style.RESET_ALL}Furtif - Pas d'exfiltration XSS")
     
-    engine = InjectionEngine(args.url, attacker_url=args.attacker_url, aggressive=args.aggressive, stealth=args.stealth)
+    try:
+        engine = InjectionEngine(
+            args.url,
+            attacker_url=args.attacker_url,
+            aggressive=args.aggressive,
+            stealth=args.stealth,
+            fast=args.fast,
+            parallel_workers=6 if args.fast else (4 if args.aggressive else 0),
+            exploit=args.exploit,
+        )
+    except Exception as e:
+        print(f"{Fore.RED}[X] {Style.RESET_ALL}Initialisation moteur: {e}")
+        sys.exit(1)
+
     params = engine.discover_params()
-    
-    # Scanner flexible - accepte les URLs avec ou sans paramètres
-    modules_without_params = ['forms', 'admin', 'cms', 'cookies']
-    needs_params = not any(mod in args.modules.split(',') for mod in modules_without_params)
-    
+    form_params = engine.discover_form_params() if not params else []
+    effective_params = params or form_params or DEFAULT_INJECTION_PARAM_NAMES
+
+    modules_without_params = ["forms", "admin", "cms", "cookies", "config", "asvs"]
+    needs_params = not any(mod in args.modules.split(",") for mod in modules_without_params)
+
     if needs_params and not params:
-        print(f"{Fore.YELLOW}[!] {Style.RESET_ALL}Aucun paramètre détecté dans l'URL")
-        print(f"{Fore.YELLOW}[!] {Style.RESET_ALL}Seuls les modules suivants fonctionnent sans paramètres : forms, admin, cms, cookies")
-        print(f"{Fore.YELLOW}[!] {Style.RESET_ALL}Pour les tests d'injection, ajoutez des paramètres (ex: ?id=1&test=2)")
-        print(f"{Fore.GREEN}[✓] {Style.RESET_ALL}Continuation avec les modules compatibles...\n")
-    
-    if params:
-        print(f"{Fore.GREEN}[✓] {Style.RESET_ALL}Paramètres détectés: {', '.join(params)}\n")
+        print(f"{Fore.YELLOW}[!] {Style.RESET_ALL}Aucun paramètre dans l'URL; utilisation de paramètres par défaut / formulaires")
+        print(f"{Fore.GREEN}[OK] {Style.RESET_ALL}Parametres effectifs: {', '.join(effective_params[:15])}{'...' if len(effective_params) > 15 else ''}\n")
+    elif params:
+        print(f"{Fore.GREEN}[OK] {Style.RESET_ALL}Parametres detectes: {', '.join(params)}\n")
     else:
-        print(f"{Fore.GREEN}[✓] {Style.RESET_ALL}Scan sans paramètres - modules compatibles uniquement\n")
+        print(f"{Fore.GREEN}[OK] {Style.RESET_ALL}Scan sans parametres URL - modules compatibles uniquement\n")
     
     # Modules mapping
     modules_map = {
+        # Modules d'injection classiques
         'sqli': SQLIBlind,
         'xss': XSSPolyglot,
         'cmdi': CMDIRCE,
@@ -143,10 +205,20 @@ def main():
         'ldap': LDAPInjection,
         'xpath': XPathInjection,
         'orm': ORMInjection,
+        
+        # Modules de découverte
         'forms': FormsScanner,
         'admin': AdminFinder,
         'cms': CMSDetector,
         'cookies': CookiesAnalyzerV3,
+        
+        # Nouveaux modules v4.0 - OWASP A05:2025 Spécialiste
+        'template': TemplateInjection,
+        'ssrf': SSRFDetector,
+        'deserialization': Deserialization,
+        'websocket': WebSocketInjection,
+        'config': ConfigAuditor,
+        'asvs': ASVSCompliance,
     }
     
     all_vulns = []
@@ -156,34 +228,27 @@ def main():
                 print(f"\n{Fore.CYAN}{'='*70}{Style.RESET_ALL}")
                 print(f"{Fore.CYAN}[ {name.upper()} ]{Style.RESET_ALL}")
                 print(f"{Fore.CYAN}{'='*70}{Style.RESET_ALL}")
-                if name in ['forms', 'admin', 'cms', 'cookies']:
+                if name in ["forms", "admin", "cms", "cookies", "config", "asvs"]:
                     module = module_class(engine)
                     vulns = module.scan(aggressive=args.aggressive)
+                elif name in ["template", "ssrf", "deserialization", "websocket"]:
+                    module = module_class(engine, aggressive=args.aggressive)
+                    vulns = module.scan(effective_params)
                 else:
-                    # Vérifier si des paramètres sont disponibles pour les modules d'injection
-                    if params:
-                        module = module_class(engine, aggressive=args.aggressive)
-                        vulns = module.scan(params)
-                    else:
-                        print(f"{Fore.YELLOW}[!] {Style.RESET_ALL}Module {name} ignoré - nécessite des paramètres URL")
-                        vulns = []
+                    module = module_class(engine, aggressive=args.aggressive)
+                    vulns = module.scan(effective_params)
                 all_vulns.extend(vulns)
             break
         elif mod_name in modules_map:
             print(f"\n{Fore.CYAN}{'='*70}{Style.RESET_ALL}")
             print(f"{Fore.CYAN}[ {mod_name.upper()} ]{Style.RESET_ALL}")
             print(f"{Fore.CYAN}{'='*70}{Style.RESET_ALL}")
-            if mod_name in ['forms', 'admin', 'cms', 'cookies']:
+            if mod_name in ["forms", "admin", "cms", "cookies", "config", "asvs"]:
                 module = modules_map[mod_name](engine)
                 vulns = module.scan(aggressive=args.aggressive)
             else:
-                # Vérifier si des paramètres sont disponibles pour les modules d'injection
-                if params:
-                    module = modules_map[mod_name](engine, aggressive=args.aggressive)
-                    vulns = module.scan(params)
-                else:
-                    print(f"{Fore.YELLOW}[!] {Style.RESET_ALL}Module {mod_name} ignoré - nécessite des paramètres URL")
-                    vulns = []
+                module = modules_map[mod_name](engine, aggressive=args.aggressive)
+                vulns = module.scan(effective_params)
             all_vulns.extend(vulns)
     
     # Rapport final
@@ -192,7 +257,7 @@ def main():
     print(f"{Fore.CYAN}{'='*70}{Style.RESET_ALL}")
     
     if not all_vulns:
-        print(f"\n{Fore.GREEN}[✓] {Style.RESET_ALL}Aucune vulnérabilité d'injection détectée\n")
+        print(f"\n{Fore.GREEN}[OK] {Style.RESET_ALL}Aucune vulnerabilite d'injection detectee\n")
     else:
         print(f"\n{Fore.RED}[!] {Style.RESET_ALL}{len(all_vulns)} vulnérabilité(s) détectée(s):\n")
         for i, v in enumerate(all_vulns, 1):
@@ -208,7 +273,13 @@ def main():
                 'admin': Fore.CYAN,
                 'cms': Fore.GREEN,
                 'cookie': Fore.YELLOW,
-                'session_variation': Fore.CYAN
+                'session_variation': Fore.CYAN,
+                'template_injection': Fore.MAGENTA,
+                'ssrf': Fore.BLUE,
+                'deserialization': Fore.RED,
+                'websocket_injection': Fore.CYAN,
+                'config_violation': Fore.YELLOW,
+                'asvs_violation': Fore.GREEN
             }.get(v['type'], Fore.WHITE)
             
             # Affichage détaillé selon le type
@@ -238,7 +309,45 @@ def main():
             print()
     
     print(f"{Fore.CYAN}{'='*70}{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}[✓] {Style.RESET_ALL}Scan terminé !\n")
+    print(f"{Fore.GREEN}[OK] {Style.RESET_ALL}Scan termine !\n")
+
+    if getattr(args, "out_json", None):
+        try:
+            import json
+            out = {"target": args.url, "vulnerabilities": all_vulns}
+            with open(args.out_json, "w", encoding="utf-8") as f:
+                json.dump(out, f, ensure_ascii=False, indent=2)
+            print(f"{Fore.GREEN}[OK] {Style.RESET_ALL}Rapport JSON: {args.out_json}\n")
+        except Exception as e:
+            print(f"{Fore.RED}[X] {Style.RESET_ALL}Export JSON: {e}\n")
+
+    # PDF : généré si --out-pdf fourni, ou si --out-json fourni (même base de nom)
+    out_pdf = getattr(args, "out_pdf", None)
+    if not out_pdf and getattr(args, "out_json", None):
+        out_pdf = str(args.out_json).rsplit(".", 1)[0] + ".pdf"
+    if out_pdf:
+        try:
+            try:
+                from reporting.a05_aggregator import aggregate_injection_run
+                from reporting.client_report import generate_client_pdf
+            except ImportError:
+                from injection.reporting.a05_aggregator import aggregate_injection_run
+                from injection.reporting.client_report import generate_client_pdf
+            from pathlib import Path
+            aggregated = aggregate_injection_run(
+                target=args.url,
+                vulnerabilities=all_vulns,
+                mode="aggressive" if args.aggressive else "standard",
+                project="InjectionHunter Pentest",
+                metadata={},
+            )
+            logo_path = str(Path(__file__).resolve().parent / "image" / "logoinjection.png")
+            generate_client_pdf(aggregated, out_pdf, logo_path=logo_path)
+            print(f"{Fore.GREEN}[OK] {Style.RESET_ALL}Rapport PDF client: {out_pdf}\n")
+        except Exception as e:
+            print(f"{Fore.RED}[X] {Style.RESET_ALL}Génération PDF: {e}\n")
+            import traceback
+            traceback.print_exc()
     
     # Garder serveur actif pour XSS (seulement si pas mode furtif)
     if any(v['type'] == 'xss' for v in all_vulns) and not args.stealth:
@@ -259,7 +368,7 @@ if __name__ == "__main__":
         print(f"\n{Fore.YELLOW}[!] {Style.RESET_ALL}Scan interrompu\n")
         sys.exit(0)
     except Exception as e:
-        print(f"\n{Fore.RED}[✗] {Style.RESET_ALL}Erreur: {e}\n")
+        print(f"\n{Fore.RED}[X] {Style.RESET_ALL}Erreur: {e}\n")
         import traceback
         traceback.print_exc()
         sys.exit(1)
