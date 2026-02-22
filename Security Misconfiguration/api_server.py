@@ -1,4 +1,5 @@
-"""API locale pour relier l'interface web (Vite/React) au scanner A02.
+"""
+API locale pour relier l'interface web (Vite/React) au scanner A02.
 
 Objectif:
 - Exposer un endpoint HTTP simple /scan qui exécute le runner existant et renvoie du JSON.
@@ -23,6 +24,9 @@ from functools import wraps
 import jwt
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
+
+from a02_security_misconfiguration.database.db import db, migrate
+from a02_security_misconfiguration.database.models import User, ScanRun, Finding, Artifact, AuditLog
 
 # Les runners sont exécutés via subprocess (ne pas importer main() ici)
 from a02_security_misconfiguration.registry import CHECKS
@@ -57,7 +61,7 @@ def generate_token(app_key: str = None) -> str:
     payload = {
         "iat": datetime.utcnow(),
         "exp": datetime.utcnow() + timedelta(minutes=TOKEN_EXPIRATION_MINUTES),
-        "type": "scanner_token"
+        "type": "scanner_token",
     }
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
@@ -84,27 +88,58 @@ def require_auth(f):
             return jsonify({
                 "error": "Authentification requise",
                 "message": "Veuillez fournir un token JWT via le header 'Authorization: Bearer <token>'",
-                "hint": "Obtenez un token via GET /auth/token"
+                "hint": "Obtenez un token via GET /auth/token",
             }), 401
 
         token = auth_header[7:]  # Enlever "Bearer "
-
         payload = verify_token(token)
         if payload is None:
             return jsonify({
                 "error": "Token invalide ou expiré",
-                "message": "Le token JWT n'est pas valide ou a expiré"
+                "message": "Le token JWT n'est pas valide ou a expiré",
             }), 401
 
-        # Passer le payload au endpoint
         request.jwt_payload = payload
         return f(*args, **kwargs)
 
     return decorated_function
 
 
+def get_or_create_system_user_id() -> int:
+    """Retourne l'ID du user 'system'. Le crée si absent."""
+    u = User.query.filter_by(username="system").first()
+    if u:
+        return u.id
+    u = User(email="system@local", username="system", password_hash="x", role="admin")
+    db.session.add(u)
+    db.session.commit()
+    return u.id
+
+
+def log_action(user_id: int | None, scan_db_id: int | None, action: str, details: dict):
+    """Écrit un audit log."""
+    db.session.add(AuditLog(
+        user_id=user_id,
+        scan_id=scan_db_id,
+        action=action,
+        ip=request.remote_addr,
+        user_agent=request.headers.get("User-Agent", ""),
+        details=json.dumps(details, ensure_ascii=False),
+    ))
+    db.session.commit()
+
+
 def create_app() -> Flask:
-    app = Flask(__name__)
+    app = Flask(__name__, instance_relative_config=True)
+
+    # SQLite -> instance/a02_scans.db
+    app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", "sqlite:///a02_scans.db")
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"connect_args": {"check_same_thread": False}}
+
+    db.init_app(app)
+    migrate.init_app(app, db)
+
     CORS(app, resources={r"/*": {"origins": "*"}})
 
     import sys
@@ -120,8 +155,8 @@ def create_app() -> Flask:
         return jsonify({
             "token": token,
             "type": "Bearer",
-            "expiresIn": TOKEN_EXPIRATION_MINUTES * 60,  # en secondes
-            "message": "Utilisez ce token dans le header 'Authorization: Bearer <token>' pour les appels suivants"
+            "expiresIn": TOKEN_EXPIRATION_MINUTES * 60,
+            "message": "Utilisez ce token dans le header 'Authorization: Bearer <token>' pour les appels suivants",
         })
 
     @app.post("/auth/renew")
@@ -132,7 +167,7 @@ def create_app() -> Flask:
         return jsonify({
             "token": new_token,
             "type": "Bearer",
-            "expiresIn": TOKEN_EXPIRATION_MINUTES * 60
+            "expiresIn": TOKEN_EXPIRATION_MINUTES * 60,
         })
 
     @app.get("/health")
@@ -143,11 +178,27 @@ def create_app() -> Flask:
     @app.get("/scans")
     @require_auth
     def scans():
-        # Liste officielle des sous-scans disponibles côté backend.
         return jsonify({
             "count": len(CHECKS),
-            "scans": sorted(CHECKS.keys())
+            "scans": sorted(CHECKS.keys()),
         })
+
+    # ✅ Historique DB pour le frontend
+    @app.get("/api/history")
+    @require_auth
+    def history():
+        items = ScanRun.query.order_by(ScanRun.started_at.desc()).limit(50).all()
+        return jsonify([
+            {
+                "id": s.id,
+                "target": s.target,
+                "scan_type": s.scan_type,
+                "status": s.status,
+                "started_at": s.started_at.isoformat() if s.started_at else None,
+                "finished_at": s.finished_at.isoformat() if s.finished_at else None,
+            }
+            for s in items
+        ])
 
     @app.post("/scan")
     @require_auth
@@ -157,13 +208,10 @@ def create_app() -> Flask:
         if not target:
             return jsonify({"error": "target requis"}), 400
 
-        # Option UI: exécuter un module seul (ou une liste de modules).
-        # - Compat: accepte `scan` (string) ou `scans` (liste de strings).
-        # - Ex: {"target":"example.com","scan":"port_scanner_aggressive"}
+        # --- Option UI: exécuter un module seul (ou une liste de modules).
         scan_name = (payload.get("scan") or "").strip()
         scans_list = payload.get("scans")
         if not scan_name and isinstance(scans_list, list) and scans_list:
-            # on prend le premier pour l’instant (runner single)
             scan_name = str(scans_list[0]).strip()
 
         connect_timeout = _safe_float(payload.get("connectTimeout"), 3.0)
@@ -174,101 +222,110 @@ def create_app() -> Flask:
         turbo = bool(payload.get("turbo", False))
         generate_pdf = bool(payload.get("generatePdf", False))
 
-        scan_id = str(uuid.uuid4())
-        json_path = reports_dir / f"scan-{scan_id}.json"
-        pdf_path: Optional[Path] = (reports_dir / f"scan-{scan_id}.pdf") if generate_pdf else None
-        exploit_md_path = reports_dir / f"scan-{scan_id}_EXPLOITATION_GUIDE.md"
+        # --- DB: créer un scan RUNNING ---
+        system_user_id = get_or_create_system_user_id()
 
-        # Capturer stdout/stderr du runner pour debug (renvoyé seulement si souci PDF)
+        scan_db = ScanRun(
+            user_id=system_user_id,
+            target=target,
+            scan_type=("A02" if not scan_name else f"A02:{scan_name}"),
+            status="RUNNING",
+            parameters_json=json.dumps(payload, ensure_ascii=False),
+        )
+        db.session.add(scan_db)
+        db.session.commit()
+
+        log_action(system_user_id, scan_db.id, "SCAN_START", {"target": target, "scan": scan_name or "full"})
+
+        def fail(status_code: int, message: str, extra: dict):
+            scan_db.status = "ERROR"
+            scan_db.finished_at = datetime.utcnow()
+            scan_db.error_message = message
+            db.session.commit()
+            log_action(system_user_id, scan_db.id, "SCAN_FAILED", {"message": message, **extra})
+            return jsonify({"error": message, **extra}), status_code
+
+        # --- Fichiers de report (uuid côté fichiers)
+        scan_uuid = str(uuid.uuid4())
+        json_path = reports_dir / f"scan-{scan_uuid}.json"
+        pdf_path: Optional[Path] = (reports_dir / f"scan-{scan_uuid}.pdf") if generate_pdf else None
+        exploit_md_path = reports_dir / f"scan-{scan_uuid}_EXPLOITATION_GUIDE.md"
+
         last_stdout = ""
         last_stderr = ""
 
         if scan_name:
             if scan_name not in CHECKS:
-                return jsonify({
-                    "error": "scan inconnu",
+                return fail(400, "scan inconnu", {
                     "scan": scan_name,
                     "availableScans": sorted(CHECKS.keys()),
-                }), 400
-            # Runner "single" : un sous-scan.
-            # NB: run_single ne gère pas PDF/guide; l’UI peut quand même afficher le résultat.
-            # On écrit un JSON wrapper côté API pour garder un format stable côté front.
-            single_tmp = reports_dir / f"scan-{scan_id}_single.json"
+                })
+
+            single_tmp = reports_dir / f"scan-{scan_uuid}_single.json"
             argv = [
-                "--target",
-                target,
-                "--connect-timeout",
-                str(connect_timeout),
-                "--read-timeout",
-                str(read_timeout),
-                "--retries",
-                str(retries),
-                "--per-scan-timebox",
-                str(per_scan_timebox),
-                "--scan",
-                scan_name,
-                "--out",
-                str(single_tmp),
+                "--target", target,
+                "--connect-timeout", str(connect_timeout),
+                "--read-timeout", str(read_timeout),
+                "--retries", str(retries),
+                "--per-scan-timebox", str(per_scan_timebox),
+                "--scan", scan_name,
+                "--out", str(single_tmp),
             ]
-            # Isolation via sous-processus: évite les effets de bord (argparse/sys.exit/news futures after shutdown).
-            cmd = [
-                python_exe,
-                "-m",
-                "a02_security_misconfiguration.runner.run_single",
-                *argv,
-            ]
+
+            cmd = [python_exe, "-m", "a02_security_misconfiguration.runner.run_single", *argv]
+
             try:
-                cp = subprocess.run(cmd, capture_output=True, text=True, timeout=max(30.0, float(per_scan_timebox) + 20.0))
+                cp = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(30.0, float(per_scan_timebox) + 20.0),
+                )
             except Exception as e:
-                return jsonify({
-                    "error": "exception pendant l'exécution du sous-processus",
+                return fail(500, "exception pendant l'exécution du sous-processus", {
                     "scan": scan_name,
                     "type": type(e).__name__,
                     "message": str(e),
                     "traceback": traceback.format_exc(),
-                }), 500
+                })
 
             last_stdout = (cp.stdout or "")
             last_stderr = (cp.stderr or "")
 
             if cp.returncode != 0:
-                return jsonify({
-                    "error": "scan échouée",
+                return fail(500, "scan échouée", {
                     "exitCode": cp.returncode,
                     "scan": scan_name,
                     "stderr": (cp.stderr or "")[-4000:],
                     "stdout": (cp.stdout or "")[-4000:],
-                }), 500
+                })
 
             try:
                 single_data: Dict[str, Any] = json.loads(single_tmp.read_text(encoding="utf-8"))
             except Exception as e:
-                return jsonify({"error": f"impossible de lire le JSON: {type(e).__name__}: {e}"}), 500
+                return fail(500, "impossible de lire le JSON (single)", {
+                    "type": type(e).__name__,
+                    "message": str(e),
+                })
 
-            # Wrapper minimal compatible avec `mapRunnerJsonToAggregatedResults`.
             data: Dict[str, Any] = {
-                "scan_id": scan_id,
+                "scan_id": scan_uuid,
                 "target": target,
                 "status": single_data.get("status", "COMPLETED"),
                 "mode": "single",
                 "results": [single_data],
-                "artifacts": {"json": f"/reports/{scan_id}.json"},
+                "artifacts": {"json": f"/reports/{scan_uuid}.json"},
             }
             json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
         else:
             argv = [
-                "--target",
-                target,
-                "--connect-timeout",
-                str(connect_timeout),
-                "--read-timeout",
-                str(read_timeout),
-                "--retries",
-                str(retries),
-                "--per-scan-timebox",
-                str(per_scan_timebox),
-                "--out",
-                str(json_path),
+                "--target", target,
+                "--connect-timeout", str(connect_timeout),
+                "--read-timeout", str(read_timeout),
+                "--retries", str(retries),
+                "--per-scan-timebox", str(per_scan_timebox),
+                "--out", str(json_path),
             ]
             if workers:
                 argv += ["--workers", str(workers)]
@@ -276,50 +333,50 @@ def create_app() -> Flask:
                 argv += ["--turbo"]
             if pdf_path is not None:
                 argv += ["--pdf", str(pdf_path)]
-            # Toujours demander la génération du guide d'exploitation (MD)
             argv += ["--exploit-guide", str(exploit_md_path)]
 
-            cmd = [
-                python_exe,
-                "-m",
-                "a02_security_misconfiguration.runner.run_full_aggressive",
-                *argv,
-            ]
+            cmd = [python_exe, "-m", "a02_security_misconfiguration.runner.run_full_aggressive", *argv]
+
             try:
-                cp = subprocess.run(cmd, capture_output=True, text=True, timeout=max(60.0, float(per_scan_timebox) * 2 + 60.0))
+                cp = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(60.0, float(per_scan_timebox) * 2 + 60.0),
+                )
             except Exception as e:
-                return jsonify({
-                    "error": "exception pendant l'exécution du scan complet (sous-processus)",
+                return fail(500, "exception pendant l'exécution du scan complet (sous-processus)", {
                     "type": type(e).__name__,
                     "message": str(e),
                     "traceback": traceback.format_exc(),
-                }), 500
+                })
 
             last_stdout = (cp.stdout or "")
             last_stderr = (cp.stderr or "")
 
             if cp.returncode != 0:
-                return jsonify({
-                    "error": "scan échouée",
+                return fail(500, "scan échouée", {
                     "exitCode": cp.returncode,
                     "stderr": (cp.stderr or "")[-4000:],
                     "stdout": (cp.stdout or "")[-4000:],
-                }), 500
+                })
 
         try:
             data: Dict[str, Any] = json.loads(json_path.read_text(encoding="utf-8"))
         except Exception as e:
-            return jsonify({"error": f"impossible de lire le JSON: {type(e).__name__}: {e}"}), 500
+            return fail(500, "impossible de lire le JSON (final)", {
+                "type": type(e).__name__,
+                "message": str(e),
+            })
 
-        data.setdefault("scan_id", scan_id)
+        data.setdefault("scan_id", scan_uuid)
         data.setdefault("artifacts", {})
-        data["artifacts"]["json"] = f"/reports/{scan_id}.json"
+        data["artifacts"]["json"] = f"/reports/{scan_uuid}.json"
 
         if pdf_path is not None:
             if pdf_path.exists():
-                data["artifacts"]["pdf"] = f"/reports/{scan_id}.pdf"
+                data["artifacts"]["pdf"] = f"/reports/{scan_uuid}.pdf"
             else:
-                # Le PDF était demandé mais n'a pas été produit.
                 data.setdefault("pdf_error", {})
                 data["pdf_error"] = {
                     "requested": True,
@@ -331,7 +388,28 @@ def create_app() -> Flask:
                 }
 
         if exploit_md_path.exists():
-            data["artifacts"]["exploitation_guide"] = f"/reports/{scan_id}_EXPLOITATION_GUIDE.md"
+            data["artifacts"]["exploitation_guide"] = f"/reports/{scan_uuid}_EXPLOITATION_GUIDE.md"
+
+        # --- DB: finaliser scan DONE + artifacts + logs ---
+        scan_db.status = "DONE"
+        scan_db.finished_at = datetime.utcnow()
+        scan_db.summary_json = json.dumps({
+            "scan_uuid": data.get("scan_id"),
+            "mode": data.get("mode"),
+            "status": data.get("status"),
+            "results_count": len(data.get("results", [])),
+        }, ensure_ascii=False)
+
+        arts = data.get("artifacts", {}) or {}
+        if arts.get("json"):
+            db.session.add(Artifact(scan_id=scan_db.id, type="json", path=arts["json"]))
+        if arts.get("pdf"):
+            db.session.add(Artifact(scan_id=scan_db.id, type="pdf", path=arts["pdf"]))
+        if arts.get("exploitation_guide"):
+            db.session.add(Artifact(scan_id=scan_db.id, type="md", path=arts["exploitation_guide"]))
+
+        db.session.commit()
+        log_action(system_user_id, scan_db.id, "SCAN_DONE", {"scan_uuid": data.get("scan_id")})
 
         return jsonify(data)
 
@@ -363,10 +441,8 @@ def create_app() -> Flask:
 
 
 if __name__ == "__main__":
-    # Local only par défaut (safe). Modifiable via env si besoin.
     host = os.environ.get("A02_API_HOST", "127.0.0.1")
     port = int(os.environ.get("A02_API_PORT", "8000"))
-    # Forcer UTF-8 sur Windows pour éviter UnicodeEncodeError (✓ etc.)
     os.environ.setdefault("PYTHONUTF8", "1")
     app = create_app()
     app.run(host=host, port=port, debug=True)

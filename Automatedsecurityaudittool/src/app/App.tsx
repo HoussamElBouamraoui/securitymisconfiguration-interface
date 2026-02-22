@@ -22,6 +22,10 @@ export default function App() {
       content: 'Backend requis: démarrez l’API Python sur http://127.0.0.1:8000',
       timestamp: new Date()
     }
+    {
+     type:'login',
+     content:''
+    }
   ]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [scanResults, setScanResults] = useState<AggregatedResults | null>(null);
