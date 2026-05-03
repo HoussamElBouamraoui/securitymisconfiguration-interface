@@ -13,9 +13,14 @@ export type A02ScanRequest = {
   scan?: string;
 };
 
-// Le backend Python tourne en local. En dev Vite on passe par un proxy (/api).
-const API_BASE = '/api';
+// Base API unifiée: utilise VITE_API_BASE si défini, sinon proxy Vite (/api).
+const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, '') || '/api';
 const TOKEN_STORAGE_KEY = 'token'; // ⚠️ Utiliser 'token' (localStorage key du App.tsx)
+
+function apiUrl(path: string): string {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${API_BASE}${normalizedPath}`;
+}
 
 export class AuthRequiredError extends Error {
   code = 'AUTH_REQUIRED' as const;
@@ -41,7 +46,7 @@ export async function getOrCreateToken(): Promise<string> {
  */
 export async function renewToken(currentToken: string): Promise<string> {
   try {
-    const response = await fetch(`${API_BASE}/auth/renew`, {
+    const response = await fetch(apiUrl('/auth/renew'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -61,7 +66,7 @@ export async function renewToken(currentToken: string): Promise<string> {
     const newToken = data.token;
     localStorage.setItem(TOKEN_STORAGE_KEY, newToken);
     return newToken;
-  } catch (error) {
+  } catch {
     if (error instanceof AuthRequiredError) throw error;
     console.error('Error renewing JWT token:', error);
     // En cas d'erreur réseau/etc, ne pas basculer vers /auth/token
@@ -71,15 +76,21 @@ export async function renewToken(currentToken: string): Promise<string> {
 
 export async function runA02Scan(payload: A02ScanRequest): Promise<unknown> {
   const token = await getOrCreateToken();
-
-  const r = await fetch(`${API_BASE}/scan`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`
-    },
-    body: JSON.stringify(payload)
-  });
+  let r: Response;
+  try {
+    r = await fetch(apiUrl('/scan'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(payload)
+    });
+  } catch (error) {
+    throw new Error(
+      `Impossible de contacter l'API (${API_BASE}). Vérifiez que le backend est démarré et que VITE_API_BASE/proxy est correct.`
+    );
+  }
 
   if (!r.ok) {
     if (r.status === 401) {
@@ -242,7 +253,7 @@ export function mapRunnerJsonToAggregatedResults(targetRaw: string, data: any): 
 export async function getA02ScansList(): Promise<{ count: number; scans: string[] }> {
   const token = await getOrCreateToken();
 
-  const r = await fetch(`${API_BASE}/scans`, {
+  const r = await fetch(apiUrl('/scans'), {
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${token}`
@@ -269,7 +280,7 @@ export async function fetchArtifact(artifactPath: string): Promise<Response | nu
   const token = await getOrCreateToken();
 
   try {
-    const r = await fetch(`${API_BASE}${artifactPath}`, {
+    const r = await fetch(apiUrl(artifactPath), {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${token}`
